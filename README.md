@@ -22,6 +22,7 @@ The ATS Mini is a **receiver**. This bridge provides frequency and mode control.
 - Works with WSJT-X **Hamlib NET rigctl** and with MSHV network CAT
 - Live **WSJT-X** and **Radio** frequency readouts
 - Strength reports from the radio log (`STRENGTH` ≈ RSSI − 73)
+- Bounded serial/TCP buffers and coalesced GUI updates so the process does not grow RAM while the monitor log is running
 
 ## Requirements
 

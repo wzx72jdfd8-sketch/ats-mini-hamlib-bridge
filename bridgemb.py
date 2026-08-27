@@ -4,7 +4,6 @@ ATS Mini Hamlib proxy GUI
 WSJT-X: Rig = Hamlib NET rigctl, Network Server = 127.0.0.1:4532
 """
 
-import queue
 import re
 import socket
 import threading
@@ -18,6 +17,10 @@ import serial.tools.list_ports
 RIG_OK = 0
 RIG_EINVAL = -1
 RIG_ENAVAIL = -11
+
+# Bound incomplete serial / TCP fragments so a stream without newlines cannot grow forever.
+MAX_LINE_BUF = 65536
+UI_FLUSH_MS = 200
 
 HAMLIB_TO_ATS = {
     "USB": "USB", "PKTUSB": "USB", "DIGU": "USB", "CW": "USB", "RTTY": "USB",
@@ -101,6 +104,8 @@ class ATSMini:
             if not chunk:
                 continue
             self._rest += chunk.decode("ascii", errors="ignore")
+            if len(self._rest) > MAX_LINE_BUF:
+                self._rest = self._rest[-MAX_LINE_BUF // 2:]
             while "\n" in self._rest:
                 line, self._rest = self._rest.split("\n", 1)
                 self._handle_line(line.strip())
@@ -111,6 +116,7 @@ class ATSMini:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 12 and re.fullmatch(r"\d{2,4}", parts[0] or ""):
             try:
+                prev_hz = self.freq_hz
                 raw_freq = int(float(parts[1]))
                 bfo = int(float(parts[2]))
                 self.mode = parts[5].upper()
@@ -127,7 +133,7 @@ class ATSMini:
                 else:
                     self.freq_hz = raw_freq * 1000 + bfo
                 self.log_enabled = True
-                if self.radio_cb:
+                if self.radio_cb and self.freq_hz != prev_hz:
                     self.radio_cb(self.freq_hz)
             except (ValueError, IndexError):
                 pass
@@ -211,6 +217,8 @@ class RigctldServer:
                 if not data:
                     break
                 rest += data.decode("ascii", errors="ignore")
+                if len(rest) > MAX_LINE_BUF:
+                    rest = rest[-MAX_LINE_BUF // 2:]
                 while "\n" in rest:
                     line, rest = rest.split("\n", 1)
                     reply = self.handle(line.strip())
@@ -381,6 +389,9 @@ class App(tk.Tk):
 
         self.radio = None
         self.server = None
+        self._pending_wsjtx = None
+        self._pending_radio = None
+        self._ui_job = None
 
         self._build()
         self._refresh_ports()
@@ -445,10 +456,35 @@ class App(tk.Tk):
             self.port_var.set(ports[0])
 
     def _on_wsjtx_freq(self, hz):
-        self.after(0, lambda: self.wsjtx_lbl.config(text="WSJT-X: %s" % fmt_freq(hz)))
+        self._pending_wsjtx = hz
+        self._schedule_ui()
 
     def _on_radio_freq(self, hz):
-        self.after(0, lambda: self.radio_lbl.config(text="Radio: %s" % fmt_freq(hz)))
+        self._pending_radio = hz
+        self._schedule_ui()
+
+    def _schedule_ui(self):
+        if self._ui_job is None:
+            self._ui_job = self.after(UI_FLUSH_MS, self._flush_ui)
+
+    def _flush_ui(self):
+        self._ui_job = None
+        if self._pending_wsjtx is not None:
+            self.wsjtx_lbl.config(text="WSJT-X: %s" % fmt_freq(self._pending_wsjtx))
+            self._pending_wsjtx = None
+        if self._pending_radio is not None:
+            self.radio_lbl.config(text="Radio: %s" % fmt_freq(self._pending_radio))
+            self._pending_radio = None
+
+    def _cancel_ui_job(self):
+        if self._ui_job is not None:
+            try:
+                self.after_cancel(self._ui_job)
+            except Exception:
+                pass
+            self._ui_job = None
+        self._pending_wsjtx = None
+        self._pending_radio = None
 
     def start(self):
         port = self.port_var.get().strip()
@@ -477,6 +513,7 @@ class App(tk.Tk):
         self.status_lbl.config(text="Running on %s:%s" % (host, tcp), foreground="green")
 
     def stop(self):
+        self._cancel_ui_job()
         if self.server:
             self.server.stop()
             self.server = None
